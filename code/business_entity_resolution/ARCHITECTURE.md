@@ -76,3 +76,7 @@ LightGBM (MIT), MiniLM (Apache-2.0, 118M params). `requirements.txt` pinned.
 ## 5. Experiment log
 | Date | Change | Val macro-F0.5 (all / US / IN) | Blocking recall | Notes |
 |---|---|---|---|---|
+| 09-25 | Sparse char-3gram TF-IDF top-k (sparse_dot_topn) | – | – | Too slow: >12 min for 150k queries on 8 cores. Dropped. |
+| 09-25 | LSA (char 2–4 TF-IDF → SVD-256) + GPU exact top-k | – | US R@10: name .688 / addr .893 / full .936; union@10 .979 (27 cands/x). IN: .596/.781/.870; union@10 .947 | 150k matched X vs full S1 pool; GPU search 15 s |
+| 09-25 | Rare-token index (df≤1000) | – | US R@10 .911, IN R@10 .890 | Complementary exact keys |
+| 09-25 | Bi-encoder v1 with random in-batch negatives | – | – | Loss collapsed to 0.005 by step 400 (too easy). Replaced by hard-negative batches (same city/state or same first name word). |
