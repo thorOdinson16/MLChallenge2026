@@ -32,8 +32,28 @@ SCORED_DIR = "logs/test_scored"
 SLICE_TMP = "logs/test_tmp"
 
 
-def unit_candidates(q, t, ks, chunk, tag):
-    """Blocking for one (source, country) unit / slice. q, t already filtered to the country.
+def build_unit_channels(t, ks, chunk, tag):
+    """Fit all blocking channels once per (source, country) unit's target set `t`.
+    Reused across every S1 slice of that unit — avoids refitting TF-IDF / the
+    house-number index (each a full pass over millions of target rows) per slice."""
+    comb = TfidfChannel("word", (1, 1), COMB_MAX_DF, f"{tag}/comb").fit(t.comb.values)
+    ta = np.where(t.addr_n.str.len().values > 0)[0]
+    addr = TfidfChannel("word", (1, 1), 0.02, f"{tag}/addr").fit(t.addr_n.values[ta])
+    glue = TfidfChannel("char", (4, 4), 0.02, f"{tag}/glue").fit(t.glue.values)
+    hn = _hn_city_index(t, label=tag)
+    return {"comb": comb, "addr": (addr, ta), "glue": glue, "hn": hn}
+
+
+def free_unit_channels(channels):
+    channels["comb"].free()
+    channels["addr"][0].free()
+    channels["glue"].free()
+    del channels["hn"]
+    gc.collect()
+
+
+def unit_candidates(q, t, channels, ks, chunk, tag):
+    """Blocking for one S1 slice against a unit's prebuilt channels.
     Returns info: dict s1_id -> {o_id: {channel: (rank, score)}}."""
     from collections import defaultdict
     info = defaultdict(lambda: defaultdict(dict))
@@ -49,25 +69,19 @@ def unit_candidates(q, t, ks, chunk, tag):
             for rk, tt in enumerate(tid):
                 info[s][tt][chan] = (rk, float(sc[rk]) if sc is not None else 1.0)
 
-    ch = TfidfChannel("word", (1, 1), COMB_MAX_DF, f"{tag}/comb").fit(t.comb.values)
-    add("comb", t_ids, ch.query(q.comb.values, ks["comb"], chunk)); ch.free()
+    add("comb", t_ids, channels["comb"].query(q.comb.values, ks["comb"], chunk))
 
+    addr_ch, ta = channels["addr"]
     qa = np.where(q.addr_n.str.len().values > 0)[0]
-    ta = np.where(t.addr_n.str.len().values > 0)[0]
-    ch = TfidfChannel("word", (1, 1), 0.02, f"{tag}/addr").fit(t.addr_n.values[ta])
-    add("addr", t_ids[ta], ch.query(q.addr_n.values[qa], ks["addr"], chunk), qmap=qa); ch.free()
+    add("addr", t_ids[ta], addr_ch.query(q.addr_n.values[qa], ks["addr"], chunk), qmap=qa)
 
-    ch = TfidfChannel("char", (4, 4), 0.02, f"{tag}/glue").fit(t.glue.values)
-    add("glue", t_ids, ch.query(q.glue.values, ks["glue"], chunk)); ch.free()
+    add("glue", t_ids, channels["glue"].query(q.glue.values, ks["glue"], chunk))
 
-    tindex = _hn_city_index(t, label=tag)
-    add("hn", t_ids, _hn_city_query(q, tindex, ks["hn"], label=tag))
-    del tindex
-    gc.collect()
+    add("hn", t_ids, _hn_city_query(q, channels["hn"], ks["hn"], label=tag))
     return info
 
 
-def process_unit(s1c, other_c, src, country, model, cols, slice_size, chunk, ks):
+def process_unit(s1c, other_c, src, country, model, cols, slice_size, chunk, ks, n_proc=None):
     """Runs one unit and saves scored pairs (s1_id, o_id, p) to SCORED_DIR."""
     out_path = f"{SCORED_DIR}/{src}_{country}.parquet"
     if os.path.exists(out_path):
@@ -76,20 +90,29 @@ def process_unit(s1c, other_c, src, country, model, cols, slice_size, chunk, ks)
     os.makedirs(SLICE_TMP, exist_ok=True)
     n = len(s1c)
     slices = list(range(0, n, slice_size))
-    tmp_files = []
+    tmp_files = [f"{SLICE_TMP}/{src}_{country}_{si}.parquet" for si in range(len(slices))]
+    pending = [si for si, f in enumerate(tmp_files) if not os.path.exists(f)]
+
+    channels = None
+    if pending:
+        print(f"\n[{src}|{country}] fitting blocking channels once on {len(other_c):,} targets "
+              f"(reused across {len(slices)} slice(s)) ...", flush=True)
+        t0 = time.time()
+        channels = build_unit_channels(other_c, ks, chunk, f"{src}/{country}")
+        print(f"[{src}|{country}] channels fit in {time.time() - t0:.0f}s", flush=True)
+
     for si, a in enumerate(slices):
-        f = f"{SLICE_TMP}/{src}_{country}_{si}.parquet"
-        tmp_files.append(f)
-        if os.path.exists(f):
+        f = tmp_files[si]
+        if si not in pending:
             print(f"[{src}|{country}] slice {si + 1}/{len(slices)} cached", flush=True)
             continue
         print(f"\n[{src}|{country}] slice {si + 1}/{len(slices)}  ({a:,}-{min(a + slice_size, n):,} of {n:,})",
               flush=True)
         q = s1c.iloc[a:a + slice_size].reset_index(drop=True)
-        info = unit_candidates(q, other_c, ks, chunk, f"{src}/{country}/s{si}")
+        info = unit_candidates(q, other_c, channels, ks, chunk, f"{src}/{country}/s{si}")
         P = build_pairs(q, other_c, info)
         del info
-        P = compute_features(P)
+        P = compute_features(P, n_proc=n_proc)
         P = P.drop(columns=[c for c in P.columns
                             if c.startswith(("a_business", "b_business", "a_name_core", "b_name_core",
                                              "a_legal", "b_legal", "a_addr_n", "b_addr_n",
@@ -97,6 +120,9 @@ def process_unit(s1c, other_c, src, country, model, cols, slice_size, chunk, ks)
         P.to_parquet(f, index=False)
         del P
         gc.collect()
+
+    if channels is not None:
+        free_unit_channels(channels)
 
     print(f"\n[{src}|{country}] concatenating {len(tmp_files)} slices + context features ...", flush=True)
     P = pd.concat([pd.read_parquet(f) for f in tmp_files], ignore_index=True)
@@ -158,7 +184,17 @@ def main():
     ap.add_argument("--slice", type=int, default=100000, help="S1 rows per slice within a unit")
     ap.add_argument("--chunk", type=int, default=500)
     ap.add_argument("--decode-only", action="store_true")
+    ap.add_argument("--src", default="S2,S3",
+                    help="comma list of sources to process (e.g. 'S2' or 'S3') -- run two "
+                         "terminals with --src S2 and --src S3 in parallel to use idle cores "
+                         "(blocking's TF-IDF query is single-threaded, so S2 and S3 units don't "
+                         "compete much); auto-decode only fires when both are requested")
+    ap.add_argument("--nproc", type=int, default=None,
+                    help="worker processes for feature engineering (default cpu_count()-2); "
+                         "lower this when running --src S2 and --src S3 concurrently so the "
+                         "two instances don't oversubscribe the CPU")
     args = ap.parse_args()
+    srcs = tuple(s.strip() for s in args.src.split(",") if s.strip())
 
     t_all = time.time()
     s1 = read_tsv(f"{args.data}/test/test_source1.tsv")
@@ -170,21 +206,27 @@ def main():
         cols = model.feature_name()
         s1 = add_norm(s1, "S1")
         others = {}
-        for src in ("S2", "S3"):
+        for src in srcs:
             df = read_tsv(f"{args.data}/test/test_source{src[1]}.tsv")
             others[src] = add_norm(df, src)
         countries = sorted(s1.country.unique())
-        print(f"countries: {countries}", flush=True)
+        print(f"countries: {countries} | sources: {srcs}", flush=True)
         ks = dict(DEFAULT_K)
         # smallest units first so problems surface early (France first)
-        order = sorted([(src, c) for src in ("S2", "S3") for c in countries],
+        order = sorted([(src, c) for src in srcs for c in countries],
                        key=lambda u: (s1.country == u[1]).sum())
         for src, c in order:
             s1c = s1[s1.country == c].reset_index(drop=True)
             oc = others[src][others[src].country == c].reset_index(drop=True)
             print(f"\n######## unit {src} | {c}: S1={len(s1c):,} targets={len(oc):,} ########", flush=True)
-            process_unit(s1c, oc, src, c, model, cols, args.slice, args.chunk, ks)
+            process_unit(s1c, oc, src, c, model, cols, args.slice, args.chunk, ks, n_proc=args.nproc)
             print(f"elapsed {(time.time() - t_all) / 3600:.2f} h", flush=True)
+
+    if set(srcs) != {"S2", "S3"}:
+        print(f"\n--src {args.src} requested (not both sources) -- skipping auto-decode. "
+              f"Run `predict.py --decode-only --thr {args.thr}` once every --src run has "
+              f"finished.", flush=True)
+        return
 
     decode_and_write(s1_ids, args.thr)
     print("\nrunning validator ...", flush=True)
