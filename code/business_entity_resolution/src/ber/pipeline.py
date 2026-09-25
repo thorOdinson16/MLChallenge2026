@@ -32,18 +32,29 @@ def prepare():
 
 def encoder_step():
     from .blocking import encoder
-    encoder.train(tag="enc_v1", exclude_s1=split.holdout_s1())
+    encoder.train(tag=candidates.ENC_TAG, epochs=2, n_pairs=10_000_000,
+                  exclude_s1=split.s1_in(split.HOLDOUT | split.MATCH))
+
+
+LEX = ("lsa_full", "lsa_name", "keys")
+
+
+def retrieve_step():
+    """Unpruned retriever passes, stored separately so each can be re-run on its own."""
+    for s in config.SPLITS:
+        candidates.generate(s, f"{s}_lex", LEX)
+        candidates.generate(s, f"{s}_enc", ("enc",))
 
 
 def prune_step():
-    xs = io.load("train", "x", ["idx"]).sample(400_000, seed=config.SEED)["idx"]
-    candidates.generate("train", "prune_sample", x_subset=xs)
+    xs = io.load("train", "x", ["idx"]).sample(600_000, seed=config.SEED).rename({"idx": "x"})
+    candidates.merge(["train_lex", "train_enc"], "prune_sample", x_subset=xs)
     prune.train()
 
 
 def cands_step():
     for s in config.SPLITS:
-        candidates.generate(s, CAND.format(split=s), prune_k=K0)
+        candidates.merge([f"{s}_lex", f"{s}_enc"], CAND.format(split=s), prune_k=K0)
     gt = io.load("train", "gt")
     c = candidates.load(CAND.format(split="train"), ["x", "s1"])
     hold_gt = gt.join(pl.DataFrame({"s1": split.holdout_s1()}), on="s1", how="semi")
@@ -91,7 +102,8 @@ def submit_step(decoder="expf"):
     submit.validate()
 
 
-STEPS = {"prepare": prepare, "encoder": encoder_step, "prune": prune_step, "cands": cands_step,
+STEPS = {"prepare": prepare, "encoder": encoder_step, "retrieve": retrieve_step, "prune": prune_step,
+         "cands": cands_step,
          "feats": feats_step, "train": train_step, "submit": submit_step}
 
 if __name__ == "__main__":

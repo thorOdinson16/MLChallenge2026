@@ -35,7 +35,8 @@ def eval_s1() -> pl.Series:
 def make_sets(cand: str, n_train_x: int = 600_000):
     c = candidates.load(cand, ["x", "s1"])
     ev = c.join(pl.DataFrame({"s1": eval_s1()}), on="s1", how="semi").select("x").unique()
-    tr = c.select("x").unique().join(ev, on="x", how="anti").sample(n_train_x, seed=config.SEED)
+    pool = c.select("x").unique().join(ev, on="x", how="anti").join(split.clean_x(), on="x", how="semi")
+    tr = pool.sample(min(n_train_x, pool.height), seed=config.SEED)
     ev.write_parquet(config.path("sets", "eval_x.parquet"))
     tr.write_parquet(config.path("sets", "train_x.parquet"))
     print("EVAL_X", ev.height, "TRAIN_X", tr.height)
@@ -131,7 +132,9 @@ def train_and_eval(rounds1=600, rounds2=600, tag="m_v1"):
     hold = pl.DataFrame({"s1": split.holdout_s1()})
     tr = add_labels(load_feats("train_x"))
     tr = tr.with_columns(fold=((pl.col("x").cast(pl.UInt64) * 2246822519) % 4294967296 % NF).cast(pl.UInt8))
-    trainable = ~pl.col("s1").is_in(hold["s1"].implode())
+    # never learn from holdout S1 labels, nor from pairs whose S1 the encoder was trained on
+    seen = pl.concat([hold["s1"], split.s1_in(split.ENC)])
+    trainable = ~pl.col("s1").is_in(seen.implode())
     cols1 = feat_cols(tr, 1)
     print("stage-1 features:", len(cols1), "train pairs:", tr.height, "pos:", tr["y"].sum(), flush=True)
     # OOF p1 on TRAIN_X

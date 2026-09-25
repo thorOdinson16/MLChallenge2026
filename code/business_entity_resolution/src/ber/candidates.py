@@ -15,8 +15,10 @@ from . import config, normalize
 from .blocking import dense, keys
 
 # retriever name -> k kept from that retriever
-K = {"lsa_full": 20, "lsa_addr": 10, "lsa_name": 10, "keys": 10, "enc": 20}
-RETRIEVERS = ("lsa_full", "lsa_addr", "lsa_name", "keys", "enc")
+K = {"lsa_full": 20, "lsa_addr": 10, "lsa_name": 10, "keys": 10, "enc": 30}
+# lsa_addr dropped: 0.017% unique true pairs on the prune sample, not worth its runtime
+RETRIEVERS = ("lsa_full", "lsa_name", "keys", "enc")
+ENC_TAG = "enc_v2"
 COLS = ["idx", "country", "nm", "nm_core", "nm_url", "ad", "ad_words", "ad_nums", "ad_state"]
 LSA_TEXT = {
     "lsa_full": lambda d: (d["nm_core"] + " | " + d["ad"]).to_list(),
@@ -31,7 +33,7 @@ class Retrievers:
     def __init__(self, db: pl.DataFrame, q_sample: pl.DataFrame, retrievers, enc_tag):
         self.db, self.retrievers = db, retrievers
         self.db_idx = db["idx"].to_numpy()
-        self.lsa, self.E = {}, {}
+        self.lsa, self.E, self.timing = {}, {}, {}
         for r in retrievers:
             if r.startswith("lsa"):
                 f = LSA_TEXT[r]
@@ -48,6 +50,7 @@ class Retrievers:
         parts = []
         qi = q["idx"].to_numpy()
         for r in self.retrievers:
+            t = time.time()
             if r.startswith("lsa"):
                 I, S = dense.gpu_topk(self.lsa[r].transform(LSA_TEXT[r](q)), self.E[r], K[r])
                 f = dense.topk_frame(qi, self.db_idx, I, S)
@@ -57,6 +60,7 @@ class Retrievers:
                 from .blocking import encoder
                 I, S = dense.gpu_topk(encoder.encode(self.enc, encoder.record_text(q)), self.E[r], K[r])
                 f = dense.topk_frame(qi, self.db_idx, I, S)
+            self.timing[r] = self.timing.get(r, 0) + time.time() - t
             parts.append(f.filter(pl.col("score") > -1e9).select(
                 "x", "s1", pl.col("score").alias(f"{r}_score"), pl.col("rank").alias(f"{r}_rank")))
         u = parts[0]
@@ -67,7 +71,7 @@ class Retrievers:
                               n_ret=pl.sum_horizontal([pl.col(c).is_not_null() for c in rank_cols]).cast(pl.UInt8))
 
 
-def generate(split: str, out: str, retrievers=RETRIEVERS, enc_tag="enc_v1", x_subset: pl.Series | None = None,
+def generate(split: str, out: str, retrievers=RETRIEVERS, enc_tag=ENC_TAG, x_subset: pl.Series | None = None,
              prune_k: int | None = None, chunk: int = 1_000_000, countries=None):
     from . import prune
     pruner = prune.load_model() if prune_k else None
@@ -95,10 +99,48 @@ def generate(split: str, out: str, retrievers=RETRIEVERS, enc_tag="enc_v1", x_su
             n += u.height
             print(f"  {split} {c} chunk {i // chunk}: {n_raw} -> {u.height} pairs ({time.time() - t0:.0f}s)",
                   flush=True)
+        print(f"  retriever seconds: { {k: round(v) for k, v in R.timing.items()} }", flush=True)
         print(f"{split} {c}: {n} pairs, {n / max(q.height, 1):.1f}/x, {time.time() - t0:.0f}s", flush=True)
         del R
+
+
+def _finish(u: pl.DataFrame) -> pl.DataFrame:
+    rank_cols = [c for c in u.columns if c.endswith("_rank") and c != "best_rank"]
+    return u.with_columns(best_rank=pl.min_horizontal(rank_cols),
+                          n_ret=pl.sum_horizontal([pl.col(c).is_not_null() for c in rank_cols]).cast(pl.UInt8))
+
+
+def merge(parts: list, out: str, prune_k: int | None = None, x_subset: pl.DataFrame | None = None):
+    """Outer-join separately generated retriever passes chunk by chunk (same chunking), then prune."""
+    from . import prune
+    pruner = prune.load_model() if prune_k else None
+    d = config.path("cands", out, "_").parent
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True, exist_ok=True)
+    names = sorted(p.name for p in config.path("cands", parts[0]).glob("*.parquet"))
+    n = nx = 0
+    for name in names:
+        u = None
+        for part in parts:
+            f = pl.read_parquet(config.path("cands", part, name)).drop("best_rank", "n_ret", strict=False)
+            if x_subset is not None:
+                f = f.join(x_subset, on="x", how="semi")
+            u = f if u is None else u.join(f, on=["x", "s1"], how="full", coalesce=True)
+        u = _finish(u)
+        if pruner is not None:
+            u = prune.prune(u, pruner, prune_k)
+        u.write_parquet(config.path("cands", out, name))
+        n += u.height
+        nx += u["x"].n_unique()
+    print(f"merged {parts} -> {out}: {n} pairs, {n / max(nx, 1):.2f}/x", flush=True)
 
 
 def load(out: str, columns=None) -> pl.DataFrame:
     return pl.concat([pl.read_parquet(p, columns=columns) for p in sorted(config.path("cands", out).glob("*.parquet"))],
                      how="diagonal_relaxed")
+
+
+if __name__ == "__main__":
+    import sys
+    # python -m ber.candidates <split> <out> <retriever,retriever,...>
+    generate(sys.argv[1], sys.argv[2], tuple(sys.argv[3].split(",")))

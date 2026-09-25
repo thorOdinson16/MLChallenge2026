@@ -133,9 +133,10 @@ def encode(model: Encoder, texts: list, bs: int = 1024) -> np.ndarray:
 if __name__ == "__main__":
     import sys
     from .. import split
-    tag = sys.argv[1] if len(sys.argv) > 1 else "enc_v1"
-    n_layers = int(sys.argv[2]) if len(sys.argv) > 2 else None
-    train(tag=tag, n_layers=n_layers, exclude_s1=split.holdout_s1())
+    tag = sys.argv[1] if len(sys.argv) > 1 else "enc_v2"
+    epochs = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+    # train only on ENC-fold entities; MATCH folds stay unseen so downstream models see test-like scores
+    train(tag=tag, epochs=epochs, n_pairs=10_000_000, exclude_s1=split.s1_in(split.HOLDOUT | split.MATCH))
     m = load(tag)
     texts = record_text(normalize.load("test", "x", ["nm", "ad", "ad_state"]).head(100_000))
     t = time.time()

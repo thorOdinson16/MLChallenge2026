@@ -80,3 +80,4 @@ LightGBM (MIT), MiniLM (Apache-2.0, 118M params). `requirements.txt` pinned.
 | 09-25 | LSA (char 2–4 TF-IDF → SVD-256) + GPU exact top-k | – | US R@10: name .688 / addr .893 / full .936; union@10 .979 (27 cands/x). IN: .596/.781/.870; union@10 .947 | 150k matched X vs full S1 pool; GPU search 15 s |
 | 09-25 | Rare-token index (df≤1000) | – | US R@10 .911, IN R@10 .890 | Complementary exact keys |
 | 09-25 | Bi-encoder v1 with random in-batch negatives | – | – | Loss collapsed to 0.005 by step 400 (too easy). Replaced by hard-negative batches (same city/state or same first name word). |
+| 09-25 | Bi-encoder enc_v1: hard-negative batches, 1.6M pairs, 1 epoch, bs 192, 43 min | – | **HOLDOUT** US R@1 .972 / R@10 .989; IN R@1 .966 / R@10 .986 | Large jump over LSA. Encode speed 6.5–9k texts/s. |

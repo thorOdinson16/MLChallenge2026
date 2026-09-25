@@ -15,7 +15,7 @@ from . import candidates, config, io, split
 
 def features(c: pl.DataFrame) -> pl.DataFrame:
     exprs = []
-    for r in candidates.RETRIEVERS:
+    for r in ("lsa_full", "lsa_addr", "lsa_name", "keys", "enc"):
         if f"{r}_score" not in c.columns:
             continue
         s = pl.col(f"{r}_score")
@@ -45,7 +45,8 @@ def train(sample_dir: str = "prune_sample") -> lgb.Booster:
     gt = io.load("train", "gt").with_columns(y=pl.lit(1, pl.UInt8))
     c = c.join(gt, on=["s1", "x"], how="left").with_columns(pl.col("y").fill_null(0))
     hold = pl.DataFrame({"s1": split.holdout_s1()})
-    tr = c.join(hold, on="s1", how="anti")
+    # train on "clean" X only (true S1 unseen by the encoder), and never on holdout S1 pairs
+    tr = c.join(split.clean_x(), on="x", how="semi").join(hold, on="s1", how="anti")
     cols = [col for col in c.columns if col.startswith("f0_")]
     params = dict(objective="binary", learning_rate=0.1, num_leaves=63, min_data_in_leaf=200,
                   feature_fraction=0.9, bagging_fraction=0.5, bagging_freq=1, verbose=-1, num_threads=14)

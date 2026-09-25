@@ -102,4 +102,19 @@ IN_STATES = {
     "dadra and nagar haveli": "dn", "daman and diu": "dd", "lakshadweep": "ld",
     "andaman and nicobar islands": "an", "ts": "tg", "or": "od", "ct": "cg", "ut": "uk", "tl": "tg",
 }
-STATE_MAPS = {"US": US_STATES, "India": IN_STATES}
+# French regions and departments -> region code (a record may carry either level)
+FR_STATES = {
+    "hauts-de-france": "hdf", "hauts de france": "hdf", "nord": "hdf", "pas-de-calais": "hdf",
+    "pas de calais": "hdf", "aisne": "hdf", "oise": "hdf", "somme": "hdf",
+    "nouvelle-aquitaine": "naq", "nouvelle aquitaine": "naq", "gironde": "naq", "landes": "naq",
+    "dordogne": "naq", "charente": "naq", "charente-maritime": "naq", "pyrenees-atlantiques": "naq",
+    "lot-et-garonne": "naq", "vienne": "naq", "haute-vienne": "naq", "correze": "naq", "creuse": "naq",
+    "deux-sevres": "naq",
+    "pays de la loire": "pdl", "pays-de-la-loire": "pdl", "loire-atlantique": "pdl", "loire atlantique": "pdl",
+    "maine-et-loire": "pdl", "vendee": "pdl", "sarthe": "pdl", "mayenne": "pdl",
+    "ile-de-france": "idf", "ile de france": "idf", "paris": "idf",
+    "auvergne-rhone-alpes": "ara", "provence-alpes-cote d'azur": "pac", "occitanie": "occ",
+    "grand est": "ges", "bretagne": "bre", "normandie": "nor", "bourgogne-franche-comte": "bfc",
+    "centre-val de loire": "cvl", "corse": "cor",
+}
+STATE_MAPS = {"US": US_STATES, "India": IN_STATES, "France": FR_STATES}
