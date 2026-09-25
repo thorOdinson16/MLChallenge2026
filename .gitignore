@@ -1,0 +1,22 @@
+# Raw challenge data (large, provided separately, not ours to redistribute)
+dataset/
+
+# Large derived artifacts (regenerable via run_all.bat / predict.py)
+logs/pairs_train.parquet
+logs/pairs_train_s1.parquet
+logs/test_scored/
+logs/test_tmp/
+backup_v1/
+
+# Final outputs (large, regenerable via predict.py; ship separately in the submission zip)
+output/*.tsv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
