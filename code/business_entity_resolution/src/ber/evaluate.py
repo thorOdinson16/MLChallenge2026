@@ -36,7 +36,7 @@ def report(pred, gt, s1_meta: pl.DataFrame, label="") -> dict:
         out[c[0]] = g["f05"].mean()
     single = r.filter(pl.col("nt") == 0)
     out["singleton_acc"] = single["f05"].mean() if single.height else float("nan")
-    print(f"[eval {label}] " + "  ".join(f"{k}={v:.5f}" for k, v in out.items()))
+    print(f"[eval {label}] " + "  ".join(f"{k}={(v if v is not None else float('nan')):.5f}" for k, v in out.items()))
     return out
 
 
