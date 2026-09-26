@@ -1,4 +1,4 @@
-# Architecture — Business Entity Resolution (Amazon ML Challenge 2026)
+# AnchorMatch architecture — Business Entity Resolution (Amazon ML Challenge 2026)
 
 Living design doc. Every stage is a separate, cached, independently re-runnable module so
 any stage can be improved without touching the others. Scores for every change go in the

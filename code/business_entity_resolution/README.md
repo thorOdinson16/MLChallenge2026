@@ -1,4 +1,4 @@
-# Business Entity Resolution — reproducible pipeline
+# AnchorMatch — Business Entity Resolution pipeline
 
 Design, EDA findings and the experiment log live in [ARCHITECTURE.md](ARCHITECTURE.md).
 

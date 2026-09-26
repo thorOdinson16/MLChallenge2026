@@ -1,4 +1,4 @@
-# ML Challenge 2026: Business Entity Resolution Solution
+# ML Challenge 2026: Business Entity Resolution — AnchorMatch
 
 **Team Name:** [Your Team Name]  
 **Team Members:** [List all team members]  
