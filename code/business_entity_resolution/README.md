@@ -1,5 +1,7 @@
 # AnchorMatch — Business Entity Resolution pipeline
 
+**Team Oura Oura** — Abhijna D S, Abhijnan B C, A K Pranav, Abyud Somashekara Shetty
+
 Design, EDA findings and the experiment log live in [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Setup
