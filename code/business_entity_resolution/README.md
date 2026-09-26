@@ -7,7 +7,8 @@ Design, EDA findings and the experiment log live in [ARCHITECTURE.md](ARCHITECTU
 python -m venv .venv && source .venv/bin/activate      # Python 3.10
 pip install -r requirements.txt                         # install the CUDA torch build first (see file)
 ```
-Hardware used: 16 GB RAM, one 6 GB NVIDIA GPU (RTX 4050 Laptop), about 60 GB free disk.
+Hardware used: 16 GB RAM, one 6 GB NVIDIA GPU (RTX 4050 Laptop), about 60 GB free disk. The full run from
+raw data takes about 7 hours; run GPU steps one at a time.
 Everything streams in chunks, so larger machines only run faster.
 
 ## Data locations
@@ -25,9 +26,10 @@ cd src
 python -m ber.pipeline all
 # or step by step (each step caches its result under work/):
 python -m ber.pipeline prepare   # TSV -> parquet, learned transliteration dict, normalisation
-python -m ber.pipeline encoder   # fine-tune multilingual MiniLM bi-encoder (about 40 min on the GPU)
+python -m ber.pipeline encoder   # fine-tune multilingual MiniLM bi-encoder on ENC folds (about 45 min on the GPU)
+python -m ber.pipeline retrieve  # un-pruned retriever passes (LSA, keys, encoder) for train + test (about 4 h)
 python -m ber.pipeline prune     # candidate sample -> stage-0 pruner
-python -m ber.pipeline cands     # pruned candidates for train + test  -> candidate_pairs set
+python -m ber.pipeline cands     # merge + prune -> final candidate set (candidate_pairs.tsv)
 python -m ber.pipeline feats     # pair features (TRAIN_X, EVAL_X, test)
 python -m ber.pipeline train     # 2-stage LightGBM matcher, prints holdout macro-F0.5
 python -m ber.pipeline submit    # test predictions -> decoding -> output/*.tsv -> official validator

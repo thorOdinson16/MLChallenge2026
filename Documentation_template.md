@@ -2,7 +2,7 @@
 
 **Team Name:** [Your Team Name]  
 **Team Members:** [List all team members]  
-**Submission Date:** [Date]
+**Submission Date:** 2026-09-26
 
 ---
 
@@ -65,9 +65,14 @@ pruner, then a two-stage GBDT matcher, then expected-F0.5 decoding.
     frequency ≤ 1000, weighted by IDF).
 - **Stage-0 pruner.** A LightGBM on retrieval signals (score, rank and gap to the best score per
   retriever, number of retrievers agreeing, number of candidates) keeps the top candidates per record.
-- **Candidate pairs generated:** [fill]
-- **How true matches were kept:** each retriever's contribution was measured on held-out
-  entities. The union reaches 99.35% recall before pruning.
+- **Candidate pairs generated (test):** before pruning, the lexical pass (LSA full + LSA name +
+  keys) produced 366.6M pairs (~37 per record) and the encoder pass 299.1M (30 per record). After the
+  merge and stage-0 pruning, the final set is **21.85M pairs for 9.97M S2/S3 records (2.2 per record)**,
+  a reduction ratio above 99.999% of the within-country cross product.
+- **How true matches were kept:** each retriever's contribution was measured on held-out entities.
+  Encoder alone, holdout R@10: US 98.9%, India 98.6% (LSA name+address: 93.6% / 87.0%).
+  Recall of the retriever union: **99.45%**. Recall after pruning (12 kept per record plus a probability
+  floor): **98.92%** on holdout entities.
 
 ---
 
@@ -92,14 +97,39 @@ against global thresholds.
 ---
 
 ## 5. Results & Error Analysis
-- **F_0.5 Score (macro, holdout entities never used in training):** [fill]
-- **Common false positives (wrong merges):** [fill]
-- **Common false negatives (missed matches):** [fill]
+- **F_0.5 Score (macro, holdout entities never used in training):** **0.9856** (US 0.9865, India 0.9844);
+  micro precision 0.996, micro recall 0.965, singleton accuracy 0.982 (threshold 0.8 on stage-2 probability).
+
+| Decoder (stage-2 p) | macro F0.5 |
+|---|---|
+| threshold 0.5 | 0.9830 |
+| threshold 0.7 | 0.9852 |
+| **threshold 0.8** | **0.9856** |
+| threshold 0.9 | 0.9852 |
+| expected-F0.5 optimal (uncalibrated p) | 0.9848 |
+| stage 1 only, best threshold | 0.9830 |
+
+- **France (no labels):** predicted 3.50 matches per S1 and 4.8% empty, vs 3.38 / 5.7% for US.
+  This matches the training-set pattern, so the language-agnostic features appear to transfer.
+- **Common false positives (wrong merges):** 73% involve an S2/S3 record that belongs to *no* S1 entity.
+  Typical cases are decoys with an identical or near-identical name and an empty address, or an altered
+  house number (6622 vs 662). The rest are replaced or garbled names at an address shared with the S1.
+- **Common false negatives (missed matches):** 31% are lost in blocking or pruning. The remainder are
+  records with an empty address where only the name is available (the model is conservative because the
+  decoys look the same), fully replaced names (`Ve0vantage` for *Massie Family Practice LLC*), and
+  names cut down to a generic stem (`Indian Private Limited Center`).
 
 ---
 
 ## 6. Conclusion
-[fill]
+Recasting the problem from the S2/S3 side and exploiting that each record belongs to at most one entity
+turned entity resolution into a ranking problem that a fine-tuned bi-encoder solves well at retrieval
+(98.9% R@10). A cheap learned pruner keeps the candidate set tiny (2.2 per record), and a two-stage
+GBDT with cluster context reaches 0.9856 macro-F0.5 on entities never seen in training. The most useful
+lessons were: train the encoder on a separate fold from the downstream models (otherwise it memorises
+and its scores mislead the matcher); use hard-negative batches; and keep every feature language-agnostic
+so the model carries over to an unseen country (France). Remaining headroom is mostly recall: records
+with empty addresses and garbled names.
 
 ---
 
