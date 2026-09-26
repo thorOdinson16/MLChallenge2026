@@ -208,3 +208,59 @@ def predict_test():
     out.write_parquet(config.path("preds", f"test_{TAG}.parquet"))
     print(f"test predicted {out.height} pairs in {time.time() - t0:.0f}s", flush=True)
     return out
+
+
+# ------------------------------------------------------------------------------------------ stage 2 + cross-encoder
+def _ce(split_name):
+    p = config.path("preds", f"ce_{split_name}.parquet")
+    return pl.read_parquet(p) if p.exists() else None
+
+
+def _ctx_with_ce(kk: pl.DataFrame, split_name: str) -> pl.DataFrame:
+    ctx = pl.concat([context(g.drop("country"), split_name) for _, g in kk.group_by("country")])
+    ce = _ce(split_name)
+    if ce is not None:
+        ctx = ctx.join(ce, on=["x", "s1"], how="left").with_columns(c_ce=pl.col("ce").fill_null(-99.0)).drop("ce")
+    return ctx
+
+
+def retrain_stage2(tag_out="m_v2ce", rounds2=700, max_rows=6_000_000, seeds=(0,)):
+    """Reuse v2 stage-1 (OOF p1 in preds/train_m_v2) and retrain stage 2 with the cross-encoder feature (c_ce).
+    Several seeds are averaged (bagging)."""
+    t0 = time.time()
+    k = train_keys()
+    tr = k.filter(pl.col("trainable"))
+    if tr.height > max_rows:
+        tr = tr.sample(max_rows, seed=config.SEED)
+    p1 = pl.read_parquet(config.path("preds", "train_m_v2.parquet"), columns=["x", "s1", "src", "country", "p1"])
+    ctx = _ctx_with_ce(p1, "train")
+    print(f"  context+ce {time.time() - t0:.0f}s", flush=True)
+    cols2 = feat_cols("train_all_v2") + [c for c in ctx.columns if c.startswith("c_")]
+    keys2, X2 = _matrix("train_all_v2", cols2, tr.select("x", "s1"), extra=ctx)
+    y2 = keys2.join(tr.select("x", "s1", "y"), on=["x", "s1"], how="left")["y"].to_numpy()
+    models = []
+    for sd in seeds:
+        m = lgb.train({**PARAMS, "seed": config.SEED + sd, "bagging_seed": sd + 1, "feature_fraction_seed": sd + 7},
+                      lgb.Dataset(X2, y2, feature_name=cols2), rounds2)
+        m.save_model(str(config.path("models", f"{tag_out}_s2_{sd}.txt")))
+        models.append(m)
+        print(f"  stage-2 seed {sd} {time.time() - t0:.0f}s", flush=True)
+    del X2
+    imp = sorted(zip(models[0].feature_importance("gain"), cols2), reverse=True)[:15]
+    print("top stage-2:", [(c, round(g / 1e3)) for g, c in imp], flush=True)
+    for split_name, name in (("train", "train_all_v2"), ("test", "test_v2")):
+        base = p1 if split_name == "train" else None
+        if split_name == "test":
+            m1 = lgb.Booster(model_file=str(config.path("models", f"{TAG}_s1.txt")))
+            kk = load_cols("test_v2", ["x", "s1", "src", "country"]).join(
+                _predict_all("test_v2", m1).rename({"p": "p1"}), on=["x", "s1"])
+            c = _ctx_with_ce(kk, "test")
+        else:
+            kk, c = base, ctx
+        ps = [_predict_all(name, m, extra=c).rename({"p": f"p_{i}"}) for i, m in enumerate(models)]
+        out = kk
+        for q in ps:
+            out = out.join(q, on=["x", "s1"])
+        out = out.with_columns(p2=pl.mean_horizontal([f"p_{i}" for i in range(len(models))]).cast(pl.Float32))
+        out.select("x", "s1", "src", "country", "p1", "p2").write_parquet(config.path("preds", f"{split_name}_{tag_out}.parquet"))
+        print(f"  predicted {split_name} {time.time() - t0:.0f}s", flush=True)

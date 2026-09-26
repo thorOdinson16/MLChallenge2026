@@ -37,7 +37,10 @@ def decode_cfg(pred: pl.DataFrame, rules: pl.DataFrame, cfg: dict) -> pl.DataFra
         p = p.filter(~((pl.col("country") == "France") & (pl.col("swap_real") > 0.5)
                        & (pl.col("ins_lr_real_max") < 1.0)))
     if cfg["dec"] == "thr":
-        sel = decode.assign_unique(p, "p2").filter(pl.col("p2") >= cfg["thr"])
+        thr = pl.lit(cfg["thr"])
+        for c, t in cfg.get("thr_by_country", {}).items():   # e.g. {"France": 0.5}: label-free prior matching
+            thr = pl.when(pl.col("country") == c).then(pl.lit(t)).otherwise(thr)
+        sel = decode.assign_unique(p, "p2").filter(pl.col("p2") >= thr)
     else:
         s = decode.decode(p.select("x", "s1", "p2"), "p2", miss=cfg.get("miss", 0.0))
         sel = s.join(p.select("x", "s1", "src", "p2"), on=["x", "s1"])
@@ -117,6 +120,49 @@ def submit_v2():
     _write_variant(v1cw, "v1_country_word", cands)
 
 
+def submit_fr_thr(t_fr: float = 0.5):
+    """v2_main with a France-only threshold (US/India rows byte-identical to v2_main)."""
+    best = json.load(open(config.path("models", "m_v2_decoder.json")))["best"]
+    pred = pl.read_parquet(config.path("preds", "test_m_v2.parquet"))
+    sel = decode_cfg(pred, _rules("test_v2"), {**best, "country_word": True, "thr_by_country": {"France": t_fr}})
+    france_proxy(sel, f"v2 France thr {t_fr}")
+    _write_variant(sel, f"v2_fr{int(t_fr * 100):02d}", candidates.load(CAND_TEST, ["x", "s1"]))
+
+
+def eval_and_submit(tag: str, t_fr: float = 0.5):
+    """Holdout eval of preds/train_{tag} (thr chosen on half A, reported on half B), then test submissions:
+    {tag}_main (same thr everywhere) and {tag}_fr (France-only lower threshold)."""
+    hold = pl.DataFrame({"s1": split.holdout_s1()}).with_columns(half=((pl.col("s1") // 10) % 2).cast(pl.UInt8))
+    pred = pl.read_parquet(config.path("preds", f"train_{tag}.parquet"))
+    ev_x = pred.join(hold, on="s1", how="semi").select("x").unique()
+    pred = pred.join(ev_x, on="x", how="semi")
+    rules = _rules("train_all_v2").join(ev_x, on="x", how="semi")
+    gt = io.load("train", "gt")
+    meta = io.load("train", "s1", ["idx", "country"]).rename({"idx": "s1"})
+    A = hold.filter(pl.col("half") == 0).join(meta, on="s1")
+    B = hold.filter(pl.col("half") == 1).join(meta, on="s1")
+    res = []
+    for t in (0.6, 0.7, 0.75, 0.8, 0.85, 0.9):
+        cfg = {"dec": "thr", "thr": t, "caps": True, "country_word": True}
+        sel = decode_cfg(pred, rules, cfg)
+        res.append((evaluate.macro_f05(sel, gt, A["s1"]), t))
+    fa, thr = max(res)
+    print(f"{tag}: half-A sweep {[(t, round(f, 5)) for f, t in res]} -> thr {thr}", flush=True)
+    cfg = {"dec": "thr", "thr": thr, "caps": True, "country_word": True}
+    sel = decode_cfg(pred, rules, cfg)
+    evaluate.report(sel, gt, B, f"{tag} half B")
+    evaluate.report(sel, gt, pl.concat([A, B]), f"{tag} full holdout")
+    t = pl.read_parquet(config.path("preds", f"test_{tag}.parquet"))
+    trules = _rules("test_v2")
+    cands = candidates.load(CAND_TEST, ["x", "s1"])
+    main = decode_cfg(t, trules, cfg)
+    france_proxy(main, f"{tag} main thr {thr}")
+    _write_variant(main, f"{tag}_main", cands)
+    fr = decode_cfg(t, trules, {**cfg, "thr_by_country": {"France": t_fr}})
+    france_proxy(fr, f"{tag} France thr {t_fr}")
+    _write_variant(fr, f"{tag}_fr{int(t_fr * 100):02d}", cands)
+
+
 if __name__ == "__main__":
     steps = sys.argv[1:] or ["all"]
     if steps == ["all"]:
@@ -124,5 +170,6 @@ if __name__ == "__main__":
     for s in steps:
         print(f"===== v2 {s}", flush=True)
         {"feats": feats, "train": matcher2.train, "eval": evaluate_v2, "test": matcher2.predict_test,
-         "submit": submit_v2}[s]()
+         "submit": submit_v2, "fr50": lambda: submit_fr_thr(0.5),
+         "ce": lambda: (matcher2.retrain_stage2("m_v2ce", seeds=(0, 1, 2)), eval_and_submit("m_v2ce"))}[s]()
         print(f"===== v2 {s} done", flush=True)
