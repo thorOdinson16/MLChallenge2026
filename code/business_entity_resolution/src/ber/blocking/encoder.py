@@ -57,9 +57,17 @@ def _batches(pairs: pl.DataFrame, bs: int, seed: int):
     return out
 
 
-def train(n_pairs=1_600_000, epochs=1, bs=192, lr=5e-5, n_layers=None, tag="enc_v1", exclude_s1=None):
+def train(n_pairs=1_600_000, epochs=1, bs=256, lr=5e-5, n_layers=None, tag="enc_v1", exclude_s1=None):
+    if DEVICE == "cuda":
+        # Windows silently spills over-allocations into shared system RAM (3x slower); fail loudly instead
+        torch.cuda.set_per_process_memory_fraction(0.9)
     tok = AutoTokenizer.from_pretrained(BASE)
     model = Encoder(n_layers=n_layers).to(DEVICE)
+    # freeze the 250k-token word-embedding matrix (96M of the 118M params): saves ~1.1 GB of grads/Adam
+    # state so training fits a 6 GB GPU without spilling; the transformer layers still adapt fully
+    model.bert.embeddings.word_embeddings.weight.requires_grad_(False)
+    # activations at bs 192 x 64 tokens peak at 5.2 GB; checkpointing trades ~30% compute for memory
+    model.bert.gradient_checkpointing_enable()
     s1 = normalize.load("train", "s1", ["idx", "country", "nm", "ad", "ad_state"])
     x = normalize.load("train", "x", ["idx", "nm", "ad", "ad_state"])
     gt = io.load("train", "gt")
@@ -75,7 +83,7 @@ def train(n_pairs=1_600_000, epochs=1, bs=192, lr=5e-5, n_layers=None, tag="enc_
         k_name=pl.col("nm").str.split(" ").list.first().fill_null(""),
     ).select("s1", "country", "k_addr", "k_name").with_row_index("row")
     del s1, x
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=lr, weight_decay=0.01)
     steps_per_epoch = len(_batches(p, bs, 0))
     total = steps_per_epoch * epochs
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -106,6 +114,9 @@ def train(n_pairs=1_600_000, epochs=1, bs=192, lr=5e-5, n_layers=None, tag="enc_
             if step % 200 == 0:
                 print(f"step {step}/{total} loss {loss.item():.4f} scale {scale.exp().item():.1f} "
                       f"{(time.time() - t0) / step:.3f}s/it", flush=True)
+            if step % 2000 == 0:
+                torch.save({"state": model.state_dict(), "n_layers": n_layers},
+                           config.path("models", f"{tag}_step.pt"))
     torch.save({"state": model.state_dict(), "n_layers": n_layers}, config.path("models", f"{tag}.pt"))
     return model
 

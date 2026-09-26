@@ -72,18 +72,25 @@ class Retrievers:
 
 
 def generate(split: str, out: str, retrievers=RETRIEVERS, enc_tag=ENC_TAG, x_subset: pl.Series | None = None,
-             prune_k: int | None = None, chunk: int = 1_000_000, countries=None):
+             prune_k: int | None = None, chunk: int = 1_000_000, countries=None, resume: bool = True):
+    """Countries with a `.done` marker are skipped when resume=True (re-run safely after interruption)."""
     from . import prune
     pruner = prune.load_model() if prune_k else None
-    d = config.path("cands", out, "x")
-    shutil.rmtree(d.parent, ignore_errors=True)
-    d.parent.mkdir(parents=True, exist_ok=True)
+    d = config.path("cands", out, "x").parent
+    if not resume:
+        shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True, exist_ok=True)
     s1 = normalize.load(split, "s1", COLS)
     x = normalize.load(split, "x", COLS)
     if x_subset is not None:
         x = x.join(pl.DataFrame({"idx": x_subset}).cast(pl.UInt32), on="idx", how="semi")
     countries = countries or sorted(s1["country"].unique().to_list())
     for c in countries:
+        if resume and (d / f"{c}.done").exists():
+            print(f"  {split} {c}: already done, skipping", flush=True)
+            continue
+        for old in d.glob(f"{c}_*.parquet"):
+            old.unlink()
         t0 = time.time()
         db = s1.filter(pl.col("country") == c)
         q = x.filter(pl.col("country") == c)
@@ -101,6 +108,7 @@ def generate(split: str, out: str, retrievers=RETRIEVERS, enc_tag=ENC_TAG, x_sub
                   flush=True)
         print(f"  retriever seconds: { {k: round(v) for k, v in R.timing.items()} }", flush=True)
         print(f"{split} {c}: {n} pairs, {n / max(q.height, 1):.1f}/x, {time.time() - t0:.0f}s", flush=True)
+        (d / f"{c}.done").touch()
         del R
 
 

@@ -94,10 +94,18 @@ def train_step():
     evaluate_preds(ev, TAG)
 
 
-def submit_step(decoder="expf"):
+THR = 0.8   # best holdout threshold for m_v1 (0.80-0.85 plateau)
+
+
+def submit_step(decoder="thr"):
     t = matcher.predict("test", "test", TAG)
     t.select("x", "s1", "p0", "p1", "p2").write_parquet(config.path("preds", f"test_{TAG}.parquet"))
-    m = decode.decode(t, "p2") if decoder == "expf" else decode.decode_threshold(t, 0.5, "p2")
+    m = decode.decode(t, "p2") if decoder == "expf" else decode.decode_threshold(t, THR, "p2")
+    # sanity: predicted matches per S1 by country (train truth: ~3.5 per S1, ~5.6% singletons)
+    s1 = io.load("test", "s1", ["idx", "country"]).rename({"idx": "s1"})
+    per = s1.join(m.group_by("s1").len("n"), on="s1", how="left").fill_null(0)
+    print(per.group_by("country").agg(mean_matches=pl.col("n").mean(),
+                                      share_empty=(pl.col("n") == 0).mean()), flush=True)
     submit.write(m, candidates.load(CAND.format(split="test"), ["x", "s1"]))
     submit.validate()
 

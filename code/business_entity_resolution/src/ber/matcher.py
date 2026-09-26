@@ -32,7 +32,7 @@ def eval_s1() -> pl.Series:
     return h.filter((h.cast(pl.UInt64) * 40503 % 3) == 0)
 
 
-def make_sets(cand: str, n_train_x: int = 600_000):
+def make_sets(cand: str, n_train_x: int = 2_000_000):
     c = candidates.load(cand, ["x", "s1"])
     ev = c.join(pl.DataFrame({"s1": eval_s1()}), on="s1", how="semi").select("x").unique()
     pool = c.select("x").unique().join(ev, on="x", how="anti").join(split.clean_x(), on="x", how="semi")
