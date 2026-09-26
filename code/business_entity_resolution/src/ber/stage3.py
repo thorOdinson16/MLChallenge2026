@@ -7,7 +7,8 @@ probabilities. Grouped 5-fold CV on the holdout: 0.98885 -> 0.98919 without the 
 
     python -m ber.stage3 train    fit on all holdout rows -> models/m_v2_s3.txt
     python -m ber.stage3 test     score the test graph    -> preds/test_m_v2_s3.parquet
-    python -m ber.stage3 submit   decode + write output/sub_stage3_*.tsv (US/India only, and all countries)
+    python -m ber.stage3 final    decode -> output/matching_results.tsv + candidate_pairs.tsv, then the official validator
+    python -m ber.stage3 submit   (optional) side variants output/sub_stage3_*.tsv, e.g. US/India-only with France from v2_main
 
 Features avoid anything tied to the size of the S1 pool (e.g. namesake counts) because the test pool is smaller.
 """
@@ -110,7 +111,15 @@ def submit_stage3(v2_main_pairs: pl.DataFrame | None = None):
         submit._write(pl.concat([usin, v2_main_pairs]), "matched_entity_ids", config.OUT / "sub_stage3_usin.tsv")
 
 
+def write_final():
+    """The deliverable: stage-3 decisions for every country, candidate set = the pruned pairs the models scored."""
+    from . import candidates
+    sel = decode_stage3(pl.read_parquet(config.path("preds", f"test_{TAG}.parquet")))
+    submit.write(sel.select("s1", "x"), candidates.load("test_pruned", ["x", "s1"]))
+    submit.validate()
+
+
 if __name__ == "__main__":
     step = sys.argv[1] if len(sys.argv) > 1 else "all"
-    for s in (["train", "test", "submit"] if step == "all" else [step]):
-        {"train": train, "test": predict_test, "submit": submit_stage3}[s]()
+    for s in (["train", "test", "final"] if step == "all" else [step]):
+        {"train": train, "test": predict_test, "submit": submit_stage3, "final": write_final}[s]()

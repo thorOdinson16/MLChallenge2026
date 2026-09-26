@@ -4,14 +4,23 @@
 
 Design, EDA findings and the experiment log live in [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Results
+| version | what changed | holdout macro-F0.5 | public leaderboard |
+|---|---|---|---|
+| v1 | bi-encoder + lexical retrieval, pruner, 2-stage LightGBM, threshold 0.8 | 0.9856 | 0.975 |
+| v2 | full-graph context, edit-fingerprint features, source caps, deterministic decode | 0.9889 | 0.982614 |
+| **v2 + cross-encoder + stage 3** (final) | cross-encoder on the uncertain band, stacker trained on out-of-sample holdout rows | **0.9910** (5-fold out-of-fold) | **0.984809** |
+
+Holdout is fold 0 of the train S1 entities (US and India only; France has no labels). Leaderboard numbers come from
+the portal.
+
 ## Setup
 ```bash
 python -m venv .venv && source .venv/bin/activate      # Python 3.10
 pip install -r requirements.txt                         # install the CUDA torch build first (see file)
 ```
-Hardware used: 16 GB RAM, one 6 GB NVIDIA GPU (RTX 4050 Laptop), about 60 GB free disk. The full run from
-raw data takes about 7 hours; run GPU steps one at a time.
-Everything streams in chunks, so larger machines only run faster.
+Hardware used: 16 GB RAM, one 6-8 GB NVIDIA GPU, about 60 GB free disk (caches under `work/` are large). Run GPU
+steps one at a time; never share the GPU between jobs. Everything streams in chunks, so larger machines only run faster.
 
 ## Data locations
 By default the code expects the challenge folder layout:
@@ -23,20 +32,56 @@ By default the code expects the challenge folder layout:
 To use other locations, set `BER_DATA`, `BER_WORK` or `BER_OUT`.
 
 ## Run end to end
+All commands run from `src/`.
+
+**1. Retrieval and candidate set (shared by every version)**
 ```bash
-cd src
-python -m ber.pipeline all
-# or step by step (each step caches its result under work/):
 python -m ber.pipeline prepare   # TSV -> parquet, learned transliteration dict, normalisation
 python -m ber.pipeline encoder   # fine-tune multilingual MiniLM bi-encoder on ENC folds (about 45 min on the GPU)
 python -m ber.pipeline retrieve  # un-pruned retriever passes (LSA, keys, encoder) for train + test (about 4 h)
 python -m ber.pipeline prune     # candidate sample -> stage-0 pruner
 python -m ber.pipeline cands     # merge + prune -> final candidate set (candidate_pairs.tsv)
-python -m ber.pipeline feats     # pair features (TRAIN_X, EVAL_X, test)
-python -m ber.pipeline train     # 2-stage LightGBM matcher, prints holdout macro-F0.5
-python -m ber.pipeline submit    # test predictions -> decoding -> output/*.tsv -> official validator
 ```
+(`python -m ber.pipeline feats | train | submit` runs the v1 matcher; v2 replaces it.)
+
+**2. v2 matcher** (features and context over the complete candidate graph of each split)
+```bash
+python -m ber.v2 feats           # pair features for every candidate pair, train and test
+python -m ber.v2 train           # stage-1 (out-of-fold) + stage-2 LightGBM -> preds/train_m_v2, models/m_v2_s{1,2}
+python -m ber.v2 eval            # decoder selection on the holdout
+python -m ber.v2 test            # -> preds/test_m_v2.parquet  (x, s1, src, p1, p2)
+```
+
+**3. Cross-encoder** (GPU, about 75 min; reads `preds/{train,test}_m_v2.parquet`)
+```bash
+python -m ber.crossenc ce_v2 0.01 0.99 4 2 all
+#                      tag   lo   hi  k epochs train-folds
+```
+Writes `models/ce_v2.pt` and `preds/ce_v2_{holdout,test}.parquet` (x, s1, ce).
+
+**4. Stage 3 and the final files**
+```bash
+python -m ber.stage3 all         # = train (about 3 min) + test (about 10 min) + final
+# or step by step:  python -m ber.stage3 train | test | final
+```
+`final` writes `output/matching_results.tsv` and `output/candidate_pairs.tsv` and runs the official validator.
+Reproducibility: retraining the cross-encoder on a GPU (and refitting the stage-3 model) is seeded but not guaranteed to be
+bit-identical. Given the shipped `models/m_v2_s3ce2.txt`, `models/ce_v2.pt` (or its scores `preds/ce_v2_*.parquet`) and
+`preds/test_m_v2.parquet`, `python -m ber.stage3 final` regenerates the submitted `matching_results.tsv` byte for byte
+(checked: identical checksum to the file that scored 0.984809).
+
 `run.sh` is a thin wrapper that sets the environment variables used on the author's machine.
+
+## What each new stage does
+- **Cross-encoder** (`crossenc.py`): reads an (X record, S1 record) text pair jointly and outputs a logit, only for pairs the
+  matcher is unsure about (stage-1 probability in [0.01, 0.99], top-4 per X). It is weaker than the LightGBM matcher
+  alone but complementary to it, and it reads cross-script pairs (Devanagari vs Latin) directly. Because it never sees
+  encoder features it can train on every non-holdout fold, unlike the matcher.
+- **Stage 3** (`stage3.py`): v2's probabilities are out-of-sample on the holdout, so those labeled rows can train one more
+  small LightGBM. Its main inputs are the gap between a pair's final probability and the strongest competing pair for
+  the same X, plus the cross-encoder logit. Features tied to the size of the S1 pool are excluded so it transfers to
+  the smaller test pool. The final decode is unique assignment per record, threshold 0.75, source caps (at most 5 S2 and
+  6 S3 matches per S1) and the country-word decoy rule.
 
 ## Code map (`src/ber/`)
 | module | role |
@@ -48,14 +93,19 @@ python -m ber.pipeline submit    # test predictions -> decoding -> output/*.tsv 
 | `blocking/keys.py` | rare-token inverted index |
 | `blocking/encoder.py` | contrastive bi-encoder (hard-negative batches) |
 | `candidates.py`, `prune.py` | retriever union and stage-0 learned pruning = final candidate set |
-| `features.py` | about 60 language-agnostic pair features |
-| `matcher.py` | stage-1 LightGBM (OOF) and stage-2 context/cluster LightGBM |
-| `decode.py` | one S1 per record, then per-entity expected-F0.5-optimal selection |
+| `features.py` | language-agnostic pair features, including v2 edit-fingerprint features |
+| `matcher.py` | v1 stage-1 LightGBM (OOF) and stage-2 context/cluster LightGBM |
+| `matcher2.py`, `v2.py` | v2 matcher (full-graph context) and its driver |
+| `crossenc.py` | cross-encoder on the uncertain band |
+| `stage3.py` | stacker trained on out-of-sample holdout rows; writes the final files |
+| `decode.py` | unique assignment, thresholds, source caps, expected-F0.5 decoder |
 | `evaluate.py` | exact macro-F0.5 metric and blocking recall |
 | `submit.py` | output TSVs and official validator |
+| `experiments/` | one-off studies (recall of each retriever, probability calibration, diagnostics); results are in ARCHITECTURE.md |
 
 ## Compliance
 Uses only the provided data. No external lookups, geocoding or APIs. Hand-written normalisation
 lexicons contain general language knowledge only (abbreviations, legal-form spellings, state names).
-Models: LightGBM (MIT) and `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
-(Apache-2.0, 118M parameters).
+Models: LightGBM (MIT) and `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (Apache-2.0, 118M parameters),
+used as the bi-encoder and, separately fine-tuned, as the cross-encoder. The base weights are downloaded from the
+Hugging Face hub once at first use; nothing else touches the network.
