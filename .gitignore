@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 __MACOSX/
 submissions/
+*.zip
+PLAN_v2.md

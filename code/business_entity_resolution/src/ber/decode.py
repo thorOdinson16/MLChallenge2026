@@ -48,8 +48,21 @@ def best_prefix(p: np.ndarray, miss: float = 0.0) -> tuple[int, float]:
 
 
 def assign_unique(scored: pl.DataFrame, prob_col: str = "p") -> pl.DataFrame:
-    """Keep each x's single highest-probability s1."""
-    return scored.sort(prob_col, descending=True).unique("x", keep="first")
+    """Keep each x's single highest-probability s1 (deterministic tie-break on s1)."""
+    return (scored.sort([prob_col, "s1"], descending=[True, False], maintain_order=True)
+                  .unique("x", keep="first", maintain_order=True))
+
+
+# verified in train ground truth: an S1 has at most 5 S2 and at most 6 S3 matches
+SOURCE_CAPS = {2: 5, 3: 6}
+
+
+def apply_caps(sel: pl.DataFrame, prob_col: str = "p") -> pl.DataFrame:
+    """Keep at most SOURCE_CAPS[src] highest-probability matches per (s1, src). Needs a src column."""
+    cap = pl.col("src").cast(pl.Int64).replace_strict(SOURCE_CAPS, default=99)
+    return (sel.sort([prob_col, "x"], descending=[True, False], maintain_order=True)
+               .with_columns(_r=pl.col("x").cum_count().over(["s1", "src"]))
+               .filter(pl.col("_r") <= cap).drop("_r"))
 
 
 def decode(scored: pl.DataFrame, prob_col: str = "p", min_p: float = 0.02, miss: float = 0.0,

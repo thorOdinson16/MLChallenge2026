@@ -52,7 +52,8 @@ class TokenSpace:
 class FeatureContext:
     """Everything needed to featurise pairs of one split+country, built once."""
 
-    def __init__(self, s1: pl.DataFrame, x: pl.DataFrame):
+    def __init__(self, s1: pl.DataFrame, x: pl.DataFrame, country: str = ""):
+        self.country = country
         self.s1 = s1.select(S1_COLS).sort("idx")
         self.x = x.select(X_COLS).sort("idx")
         # positional lookup: global idx -> row
@@ -69,12 +70,73 @@ class FeatureContext:
         self.s1_core_freq = self._freq(self.s1["nm_core"], self.s1["nm_core"])
         self.s1_ad_freq = self._freq(self.s1["ad"], self.s1["ad"])
         self.x_core_freq_in_s1 = self._freq(self.s1["nm_core"], self.x["nm_core"])
+        self.tok = token_stats(self.s1["nm_core"], self.x["nm_core"])
 
     @staticmethod
     def _freq(ref: pl.Series, target: pl.Series) -> np.ndarray:
         c = ref.value_counts(name="c")
         return (pl.DataFrame({ref.name: target}).join(c, on=ref.name, how="left")["c"]
                 .fill_null(0).to_numpy().astype(np.float32))
+
+
+# ---------------------------------------------------------------------------- edit fingerprints (v2)
+COUNTRY_WORDS = {"France": ["france", "francais", "francaise"], "India": ["india", "indian"],
+                 "US": ["usa", "america", "american"]}
+REAL_DF = 5   # a token used by >= REAL_DF S1 names of the country is a "real word" (typos are rare tokens)
+
+
+def token_stats(s1_core: pl.Series, x_core: pl.Series) -> pl.DataFrame:
+    """Per-token S1 document frequency and X-vs-S1 relative frequency (log ratio). Unsupervised, per split and
+    country: generator noise words are strongly over-represented in X (lr >> 0), real words sit near 0."""
+    def df(sr, name):
+        return (pl.DataFrame({"t": sr.str.split(" ")}).with_row_index("r").explode("t")
+                  .filter(pl.col("t") != "").unique(["r", "t"]).group_by("t").len(name))
+    n_s, n_x = max(len(s1_core), 1), max(len(x_core), 1)
+    st = df(s1_core, "df_s").join(df(x_core, "df_x"), on="t", how="full", coalesce=True).fill_null(0)
+    return st.with_columns(
+        lr=(((pl.col("df_x") + 1) / n_x).log() - ((pl.col("df_s") + 1) / n_s).log()).cast(pl.Float32),
+        idf=((n_s / (pl.col("df_s") + 1)).log()).cast(pl.Float32),
+        real=(pl.col("df_s") >= REAL_DF))
+
+
+def _edit_feats(ctx, X: pl.DataFrame, S: pl.DataFrame) -> dict:
+    """How X's name differs from S1's: inserted/deleted tokens, split into real words vs noise/typos."""
+    d = pl.DataFrame({"xt": X["nm_core"].str.split(" "), "st": S["nm_core"].str.split(" ")}).with_row_index("r")
+    d = d.with_columns(ins=pl.col("xt").list.set_difference("st"), dele=pl.col("st").list.set_difference("xt"))
+    out = {}
+    base = pl.DataFrame({"r": pl.arange(0, d.height, eager=True).cast(pl.UInt32)})
+    for col, pre in (("ins", "ins"), ("dele", "del")):
+        e = (d.select("r", pl.col(col).alias("t")).explode("t").drop_nulls().filter(pl.col("t") != "")
+               .join(ctx.tok, on="t", how="left")
+               .with_columns(pl.col("real").fill_null(False), pl.col("lr").fill_null(5.0),
+                             pl.col("idf").fill_null(15.0)))
+        a = e.group_by("r").agg(
+            n=pl.len(), n_real=pl.col("real").sum(), lr_min=pl.col("lr").min(), lr_max=pl.col("lr").max(),
+            lr_real_max=pl.col("lr").filter(pl.col("real")).max(), idf_max=pl.col("idf").max())
+        a = base.join(a, on="r", how="left").sort("r")
+        out[f"{pre}_n"] = a["n"].fill_null(0).to_numpy()
+        out[f"{pre}_real"] = a["n_real"].fill_null(0).to_numpy()
+        out[f"{pre}_lr_min"] = a["lr_min"].fill_null(-9).to_numpy()
+        out[f"{pre}_lr_max"] = a["lr_max"].fill_null(-9).to_numpy()
+        out[f"{pre}_lr_real_max"] = a["lr_real_max"].fill_null(-9).to_numpy()
+        out[f"{pre}_idf_max"] = a["idf_max"].fill_null(0).to_numpy()
+    out["swap_real"] = ((out["ins_real"] > 0) & (out["del_real"] > 0)).astype(np.float32)
+    # country word inserted into X's name (not stripped: uses canonical nm, not core)
+    cw = COUNTRY_WORDS.get(ctx.country, [ctx.country.lower()])
+    xs = X["nm"].str.split(" ").list.eval(pl.element().is_in(cw)).list.any()
+    ss = S["nm"].str.split(" ").list.eval(pl.element().is_in(cw)).list.any()
+    out["ins_country_word"] = (xs & ~ss).fill_null(False).to_numpy().astype(np.float32)
+    # signed first-house-number offset (decoys shift the number upward)
+    xo = X["ad_nums"].list.first().cast(pl.Int64, strict=False)
+    so = S["ad_nums"].list.first().cast(pl.Int64, strict=False)
+    off = (xo - so).to_numpy().astype(np.float64)
+    off = np.where(np.isnan(off), 0, off)
+    has = (xo.is_not_null() & so.is_not_null()).to_numpy()
+    out["num_off_sign"] = np.where(has, np.sign(off), -2).astype(np.float32)
+    out["num_off_log"] = np.where(has, np.sign(off) * np.log1p(np.abs(off)), 0).astype(np.float32)
+    out["num_off_pos_small"] = (has & (off >= 1) & (off <= 9)).astype(np.float32)
+    out["num_off_neg_small"] = (has & (off <= -1) & (off >= -9)).astype(np.float32)
+    return out
 
 
 def _cp(a, b, scorer):
@@ -180,4 +242,6 @@ def featurize(ctx: FeatureContext, pairs: pl.DataFrame) -> pl.DataFrame:
     f["x_ad_len"] = X["ad"].str.len_chars().to_numpy().astype(np.float32)
     f["s_ad_len"] = S["ad"].str.len_chars().to_numpy().astype(np.float32)
     f["src"] = X["src"].to_numpy().astype(np.float32)
+    if getattr(ctx, "tok", None) is not None:
+        f.update(_edit_feats(ctx, X, S))
     return pairs.with_columns([pl.Series(k, np.asarray(v, dtype=np.float32)) for k, v in f.items()])

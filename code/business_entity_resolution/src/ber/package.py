@@ -20,7 +20,7 @@ def build(team: str) -> Path:
              (PROJECT / "Documentation_template.md", "Documentation_template.md")]
     for p in sorted(CODE.rglob("*")):
         rel = p.relative_to(CODE)
-        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc" and not p.name.startswith("_"):
+        if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc" and (not p.name.startswith("_") or p.name == "__init__.py"):
             files.append((p, "code/business_entity_resolution/" + rel.as_posix()))
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for src, arc in files:
