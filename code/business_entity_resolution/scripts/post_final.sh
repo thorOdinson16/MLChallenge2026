@@ -21,8 +21,11 @@ python -m ber.tie_trim pairs "$FRP" pD 0.85 0.6 2>&1 | grep tie_trim | tee -a $L
 python -m ber.cn_rescue "$O/${NAME}cnF.tsv" "$O/${NAME}_a.tsv" fr_acronym_pairs.parquet 2>&1 | grep "cn_rescue\|validator" | tee -a $LOGS/post_$NAME.log
 python -m ber.tie_trim apply "$O/${NAME}_a.tsv" "$O/${NAME}_b.tsv" 2>&1 | grep "tie_trim\|validator" | tee -a $LOGS/post_$NAME.log
 python -m ber.twin "$O/${NAME}_b.tsv" "$O/${NAME}_SAFE.tsv" "$TW" p3 US,India 2>&1 | grep "twin\|validator" | tee -a $LOGS/post_$NAME.log
-python -m ber.experiments.gamble "$FRP" 0.3 0.75 2>&1 | grep gamble | cut -c1-80 | tee -a $LOGS/post_$NAME.log
-python -m ber.cn_rescue "$O/${NAME}_SAFE.tsv" "$O/${NAME}_GAMBLE.tsv" fr_gamble_pairs.parquet 2>&1 | grep "cn_rescue\|validator" | tee -a $LOGS/post_$NAME.log
+python -m ber.experiments.gamble "$FRP" "$O/${NAME}_SAFE.tsv" 0.6 0.8 0.75 2>&1 | grep gamble | tee -a $LOGS/post_$NAME.log
+python -m ber.cn_rescue "$O/${NAME}_SAFE.tsv" "$O/${NAME}_g1.tsv" fr_gamble_pairs.parquet 2>&1 | grep "cn_rescue\|validator" | tee -a $LOGS/post_$NAME.log
+if [ -f $ROOT/work/preds/fr_blist_pairs.parquet ]; then
+  python -m ber.cn_rescue "$O/${NAME}_g1.tsv" "$O/${NAME}_GAMBLE.tsv" fr_blist_pairs.parquet 2>&1 | grep "cn_rescue\|validator" | tee -a $LOGS/post_$NAME.log
+else cp "$O/${NAME}_g1.tsv" "$O/${NAME}_GAMBLE.tsv"; say "no B lists yet - GAMBLE = SAFE + G2"; fi
 python -m ber.acronym cands "$O/candidate_pairs_orig.tsv" "$O/cands_${NAME}.tsv" 2>&1 | grep cands | tee -a $LOGS/post_$NAME.log
 python - <<EOF 2>&1 | grep -v Warn | tee -a $LOGS/post_$NAME.log
 import hashlib, subprocess, sys

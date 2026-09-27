@@ -57,7 +57,7 @@ def _s1_table(split_name, countries):
 def _strict(d):
     ok = [_addr_ok(a, b, c, e) for a, b, c, e in zip(d["xw"].to_list(), d["sw"].to_list(), d["xnum"].to_list(),
                                                      d["snum"].to_list())]
-    d = d.with_columns(ok=pl.Series(ok)).filter(pl.col("ok"))
+    d = d.with_columns(ok=pl.Series(ok, dtype=pl.Boolean)).filter(pl.col("ok"))
     return d.with_columns(k=pl.len().over("x")).filter(pl.col("k") == 1).drop("k", "ok")
 
 
@@ -103,10 +103,14 @@ def pairs(prob_file, pcol="pD", thr=0.85):
     print(out.group_by("rule").len().sort("rule"), flush=True)
 
 
-def cands(inp, out):
-    """Add rule-B pairs to candidate_pairs.tsv so every final match stays inside the candidate set."""
+def cands(inp, out, pairs_file="fr_acronym_pairs.parquet"):
+    """Add rescue pairs to candidate_pairs.tsv so every final match stays inside the candidate set.
+    Default: the acronym rule-B pairs; any other pair file (e.g. fr_blist_pairs.parquet) adds all its pairs that are not
+    candidates yet."""
     c = pl.read_csv(inp, separator="\t", infer_schema=False).with_columns(pl.col("candidate_entity_ids").fill_null(""))
-    add = pl.read_parquet(P("preds", "fr_acronym_pairs.parquet")).filter(pl.col("rule") == "B")
+    add = pl.read_parquet(P("preds", pairs_file))
+    if pairs_file == "fr_acronym_pairs.parquet":
+        add = add.filter(pl.col("rule") == "B")
     ex = (c.filter(pl.col("candidate_entity_ids") != "").with_columns(pl.col("candidate_entity_ids").str.split(","))
             .explode("candidate_entity_ids").rename({"candidate_entity_ids": "xe"}))
     new = add.select("source1_entity_id", "xe").join(ex, on=["source1_entity_id", "xe"], how="anti")

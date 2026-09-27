@@ -188,10 +188,13 @@ acronyms, tie trim.
 | + full-coverage cross-encoder for US/India; new France cross-encoder blend; full noise-word cell | 0.9913 | 0.98770 |
 | + corrected-label full-coverage France cross-encoder (ce_full2), round-4 France labels | — | 0.98781 |
 | + round-4 XLM-R base and DistilBERT France CEs, acronym rescue, tie trim (France); twins (US/India) | 0.9914 | **0.98832** |
-| + round-5 CEs (MiniLM seed 7, DistilBERT seed 2, multilingual E5) — final | 0.9914 | *(pending)* |
+| + round-5 CEs (MiniLM seed 7, DistilBERT seed 2, multilingual E5) | 0.9914 | 0.98829 |
+| **Final submission = the 0.98832 file** (round 5 added no measurable gain) | 0.9914 | **0.98832** |
 
 Rejected submissions, kept for the record: v2 + France swap rule 0.982; v2 + mid-band France adds 0.98175;
-category-swap + dropped-word France rescues 0.98609.
+category-swap + dropped-word France rescues 0.98609; aggressive France recall adds (+3.1k pairs, entity-aware
+thresholds 0.4 / 0.7) 0.98819. The last one confirmed the India-proxy finding that mid-range France probabilities are
+over-confident.
 
 - **Leaderboard decomposition.** Countries never interact in the metric, so France-only A/Bs isolate it:
   LB = 0.85·F(US/India) + 0.15·F(France). v2 gave about 0.988 on US/India and 0.953 on France. France is the main gap
