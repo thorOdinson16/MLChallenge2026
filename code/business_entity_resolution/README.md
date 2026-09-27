@@ -80,6 +80,32 @@ duplicate propagation) is made on the labeled holdout and logged to `output/over
 
 `run.sh` is a thin wrapper that sets the environment variables used on the author's machine.
 
+**6. Late additions (27 Sep): extra France cross-encoders and post-steps**
+```bash
+# ce_full2: full-coverage MiniLM CE with corrected France labels (noise-word pairs = match), France-only test scoring
+BER_CE_CORRECTED=1 python -m ber.cefull train ce_full2 && BER_CE_CORRECTED=1 python -m ber.cefull score ce_full2
+# ce_r4f: round-4 CE, DistilBERT-multilingual (Apache-2.0) on round-4 France pseudo-labels + train band, band pair set
+BER_CE_R4=fr_pseudo4.parquet BER_CE_BASE=distilbert/distilbert-base-multilingual-cased BER_CE_LR=5e-5 \
+  BER_CE_BUDGET_MIN=55 BER_CE_SCORE_SET=band BER_CE_SEED=1 python -m ber.cefull train ce_r4f && \
+  BER_CE_R4=fr_pseudo4.parquet BER_CE_BASE=distilbert/distilbert-base-multilingual-cased BER_CE_SCORE_SET=band \
+  python -m ber.cefull score ce_r4f
+# post-steps on the final matching_results.tsv (each keeps rows of other countries byte-identical, then validates)
+python -m ber.cn_rescue <in.tsv> <out.tsv> cn_rescue_pairs_full.parquet   # France noise-suffix rescue (adds)
+python -m ber.twin <in.tsv> <out.tsv> <test_s3_X.parquet> p3 US,India     # near-duplicate X at one address (US/IN)
+python -m ber.tie_trim pairs <france_probs.parquet> pD 0.85 0.6          # France namesake-tie coin flips ...
+python -m ber.tie_trim apply <in.tsv> <out.tsv>                           # ... removed
+```
+Optional zero-shot LLM judge (Qwen/Qwen3-4B-Instruct-2507, Apache-2.0, 4.0B; no fine-tuning) on France grey-zone pairs:
+```bash
+python -m ber.experiments.llm_kit                        # work/llm_kit/{gate_holdout,france_slices}.parquet
+python ber/experiments/llm_judge.py <pairs.parquet> <out> [--shard K --nshards N]   # GPU; P("Yes") per pair
+python -m ber.experiments.llm_eval gate <gate_scores.parquet>                       # labelled holdout gate
+python -m ber.experiments.llm_eval france <france_scores.parquet> <add_min> <drop_max>
+python -m ber.cn_rescue <in.tsv> <out.tsv> fr_llm_add_pairs.parquet && python -m ber.tie_trim apply <out.tsv> <out2.tsv> fr_llm_drop_pairs.parquet
+```
+Validate the final file with the candidate set too:
+`python ../../../student_resource/utils/validate_submission.py --matching <final.tsv> --candidate <candidate_pairs.tsv> --test-dir <test dir>`.
+
 ## What each new stage does
 - **Cross-encoder** (`crossenc.py`): reads an (X record, S1 record) text pair jointly and outputs a logit, only for pairs the
   matcher is unsure about (stage-1 probability in [0.01, 0.99], top-4 per X). It is weaker than the LightGBM matcher
