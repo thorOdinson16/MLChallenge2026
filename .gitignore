@@ -8,3 +8,14 @@ __MACOSX/
 submissions/
 *.zip
 PLAN_v2.md
+
+# cloud training packages and hand-offs (large data copies)
+kaggle_ce/
+kaggle_friend/
+kaggle_seed2/
+*.zip
+kaggle_r5/
+drive_inbox/
+.vscode/
+*.parquet
+*.pt

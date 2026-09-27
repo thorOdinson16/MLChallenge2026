@@ -30,6 +30,7 @@ PARAMS = dict(objective="binary", learning_rate=0.05, num_leaves=63, min_data_in
 ROUNDS = 400
 THRS = (0.7, 0.75, 0.8, 0.85)
 REPORT = config.OUT / "overnight_report.md"
+SEEDS = int(os.environ.get("BER_S3_SEEDS", 1))   # >1: average this many stage-3 fits (different seeds) for the test model
 
 
 def log(msg):
@@ -165,15 +166,18 @@ def build_test(name, tags):
     trs = [G[g].join(hold, on="s1", how="semi") for g in tg]
     X = np.concatenate([t.select(cols).to_numpy().astype(np.float32) for t in trs]); y = np.concatenate([t["y"].to_numpy() for t in trs])
     del G, trs
-    m = lgb.train(PARAMS, lgb.Dataset(X, y, feature_name=cols), ROUNDS)
-    m.save_model(str(P("models", f"s3_{name}.txt")))
+    ms = [lgb.train({**PARAMS, "seed": 1 + i}, lgb.Dataset(X, y, feature_name=cols), ROUNDS) for i in range(SEEDS)]
+    ms[0].save_model(str(P("models", f"s3_{name}.txt")))
+    for i, mi in enumerate(ms[1:], 2):
+        mi.save_model(str(P("models", f"s3_{name}_seed{i}.txt")))
     del X
     te = pl.read_parquet(P("preds", "test_m_v2.parquet"))
     dt = build(te, "test", tags, "test").select(["x", "s1"] + BASE_COLS + ce_cols(tags) + ["p2", "country", "src"])
     outs = []
     for p in matcher2.parts("test_v2"):
         f = pl.read_parquet(p, columns=["x", "s1"] + raw_cols()).join(dt, on=["x", "s1"], how="inner")
-        p3 = m.predict(f.select(cols).to_numpy().astype(np.float32), num_threads=12).astype(np.float32)
+        Xf = f.select(cols).to_numpy().astype(np.float32)
+        p3 = np.mean([mi.predict(Xf, num_threads=12) for mi in ms], axis=0).astype(np.float32)
         outs.append(f.select("x", "s1", "src", "country", "p2", "ins_country_word").with_columns(p3=pl.Series(p3)))
     sc = pl.concat(outs)
     sc.write_parquet(P("preds", f"test_s3_{name}.parquet"))

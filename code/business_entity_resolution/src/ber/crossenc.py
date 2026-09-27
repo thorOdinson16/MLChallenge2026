@@ -45,8 +45,9 @@ def add_text(d: pl.DataFrame, split_name: str) -> pl.DataFrame:
 
 
 def run(tag: str, lo=0.02, hi=0.98, k=3, epochs=2, train_folds="match"):
-    torch.manual_seed(0)
-    np.random.seed(0)
+    seed = int(os.environ.get("BER_CE_SEED", 0))
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     tr = pl.read_parquet(config.path("preds", "train_m_v2.parquet"), columns=["x", "s1", "src", "country", "p1", "p2"])
     te = pl.read_parquet(config.path("preds", "test_m_v2.parquet"), columns=["x", "s1", "src", "country", "p1", "p2"])
     gt = io.load("train", "gt").with_columns(y=pl.lit(1, pl.UInt8))
