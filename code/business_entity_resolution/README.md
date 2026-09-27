@@ -9,7 +9,8 @@ Design, EDA findings and the experiment log live in [ARCHITECTURE.md](ARCHITECTU
 |---|---|---|---|
 | v1 | bi-encoder + lexical retrieval, pruner, 2-stage LightGBM, threshold 0.8 | 0.9856 | 0.975 |
 | v2 | full-graph context, edit-fingerprint features, source caps, deterministic decode | 0.9889 | 0.982614 |
-| **v2 + cross-encoder + stage 3** (final) | cross-encoder on the uncertain band, stacker trained on out-of-sample holdout rows | **0.9910** (5-fold out-of-fold) | **0.984809** |
+| v2 + cross-encoder + stage 3 | cross-encoder on the uncertain band, stacker trained on out-of-sample holdout rows | 0.9910 (5-fold out-of-fold) | 0.984809 |
+| **+ France-adapted cross-encoders** (`sub_K`) | cross-encoders fine-tuned with France pseudo-labels (2 rounds, MiniLM + XLM-R base), stage 3 trained on full + thinned pools, expected-F0.5 decoder, exact-duplicate consistency | **0.99120** (thinned pool 0.99083) | **0.986429** |
 
 Holdout is fold 0 of the train S1 entities (US and India only; France has no labels). Leaderboard numbers come from
 the portal.
@@ -70,6 +71,13 @@ bit-identical. Given the shipped `models/m_v2_s3ce2.txt`, `models/ce_v2.pt` (or 
 `preds/test_m_v2.parquet`, `python -m ber.stage3 final` regenerates the submitted `matching_results.tsv` byte for byte
 (checked: identical checksum to the file that scored 0.984809).
 
+**5. France adaptation (current best, `sub_K`)**
+```bash
+bash ../run_france_adapt.sh      # from src/: thinned-pool simulation, 2 pseudo-label rounds, stage 3 -> output/sub_K.tsv
+```
+About 7 h on one 8 GB GPU (the cross-encoder runs dominate). Every stage-3 choice (training pools, decoder,
+duplicate propagation) is made on the labeled holdout and logged to `output/overnight_report.md`.
+
 `run.sh` is a thin wrapper that sets the environment variables used on the author's machine.
 
 ## What each new stage does
@@ -82,6 +90,17 @@ bit-identical. Given the shipped `models/m_v2_s3ce2.txt`, `models/ce_v2.pt` (or 
   the same X, plus the cross-encoder logit. Features tied to the size of the S1 pool are excluded so it transfers to
   the smaller test pool. The final decode is unique assignment per record, threshold 0.75, source caps (at most 5 S2 and
   6 S3 matches per S1) and the country-word decoy rule.
+
+- **France adaptation** (`experiments/fr_pseudo.py`, `crossenc.py` with `BER_CE_EXTRA`): France never appears in
+  the training labels, and a cross-encoder that has never seen a country is close to useless there (US-to-India proxy:
+  band AUC 0.69). Confident stage-3 decisions on France test pairs (p3 >= 0.9 match, <= 0.05 non-match; the
+  ambiguous middle is dropped) are added as extra training rows. In the proxy these pseudo-labels recovered about 97%
+  of the gain of true labels (AUC 0.69 -> 0.93, true labels 0.94). Two rounds: labels from the ce_v2 stage 3, then from
+  the adapted stage 3. Uses only the provided unlabeled test inputs, no external data.
+- **Thinned-pool stage 3** (`experiments/thinned_sim.py`, `experiments/overnight.py`): the test S1 pool is thinner
+  than train, so stage 3 is also trained on holdout graphs with 19% of S1 removed (v2 context recomputed). Decoding
+  uses the expected-F0.5 decoder on the calibrated stage-3 probabilities, then gives every exact-duplicate X record
+  (same normalised name + address; 99.7% share one S1 in train) its group's S1.
 
 ## Code map (`src/ber/`)
 | module | role |

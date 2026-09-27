@@ -11,6 +11,7 @@ The cross-encoder never sees encoder features, so unlike the matcher it can trai
     python -m ber.crossenc <tag> [lo hi k epochs train_folds]     e.g.  python -m ber.crossenc ce_v2 0.01 0.99 4 2 all
 Outputs: models/<tag>.pt, preds/<tag>_holdout.parquet, preds/<tag>_test.parquet  (x, s1, ce)
 """
+import os
 import sys
 import time
 
@@ -22,8 +23,11 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer, get_
 
 from . import config, io, split
 
-BASE = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-MAXLEN, BS, LR = 128, 64, 3e-5
+BASE = os.environ.get("BER_CE_BASE", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+MAXLEN, BS, LR = 128, int(os.environ.get("BER_CE_BS", 64)), float(os.environ.get("BER_CE_LR", 3e-5))
+FRAC = float(os.environ.get("BER_CE_FRAC", 1.0))          # train on a random subset (pilots)
+SKIP_TEST = os.environ.get("BER_CE_SKIP_TEST") == "1"
+EXTRA = os.environ.get("BER_CE_EXTRA", "")                # optional extra TEST-split training rows (x, s1, src, country, p1, p2, y), e.g. pseudo-labels
 DEV = "cuda"
 
 
@@ -54,7 +58,13 @@ def run(tag: str, lo=0.02, hi=0.98, k=3, epochs=2, train_folds="match"):
     trn = band(rows, lo, hi, k).join(gt, on=["s1", "x"], how="left").with_columns(pl.col("y").fill_null(0))
     hh = band(tr.join(hold, on="s1", how="semi"), lo, hi, k).join(gt, on=["s1", "x"], how="left").with_columns(pl.col("y").fill_null(0))
     tt = band(te, lo, hi, k)
+    if FRAC < 1.0:
+        trn = trn.sample(fraction=FRAC, seed=0)
     trn, hh, tt = add_text(trn, "train"), add_text(hh, "train"), add_text(tt, "test")
+    if EXTRA:
+        ex = add_text(pl.read_parquet(EXTRA), "test").select(trn.columns)
+        print(f"extra training rows {ex.height} (pos {ex['y'].mean():.3f}) from {EXTRA}", flush=True)
+        trn = pl.concat([trn, ex.cast(trn.schema)])
     print(f"pairs train {trn.height} (pos {trn['y'].mean():.3f}) holdout {hh.height} test {tt.height}", flush=True)
 
     tok = AutoTokenizer.from_pretrained(BASE)
@@ -110,7 +120,8 @@ def run(tag: str, lo=0.02, hi=0.98, k=3, epochs=2, train_folds="match"):
         print(f"[epoch {ep}] holdout-band AUC: ce {roc_auc_score(y, s_h):.4f} | p2 {roc_auc_score(y, l2):.4f} | p2+ce {roc_auc_score(y, l2 + s_h):.4f}", flush=True)
         torch.save(model.state_dict(), str(config.path("models", f"{tag}.pt")))
     hh.select("x", "s1").with_columns(ce=pl.Series(s_h)).write_parquet(config.path("preds", f"{tag}_holdout.parquet"))
-    tt.select("x", "s1").with_columns(ce=pl.Series(score(tt, "test"))).write_parquet(config.path("preds", f"{tag}_test.parquet"))
+    if not SKIP_TEST:
+        tt.select("x", "s1").with_columns(ce=pl.Series(score(tt, "test"))).write_parquet(config.path("preds", f"{tag}_test.parquet"))
     print(f"DONE {tag} in {(time.time() - t0) / 60:.1f} min", flush=True)
 
 
