@@ -113,6 +113,8 @@ outputs of `scripts/post_final.sh L3c` below. Steps 1–5 must have run first (t
 `ce_xlmr_fr`, `test_s3_K.parquet` and the holdout graphs).
 
 ```bash
+python -m ber.rule_lists                      # rebuilds the 4 France rule lists into work/rules/ (label-free; needs
+                                              # output/sub_K.tsv); identical to the shipped copies in ../data/
 cp ../data/*.parquet ../../../work/preds/     # France rule lists: noise-word pairs (cn_rescue_pairs[_full]) and the
                                               # LB-negative decoy lists (nz_swap_pairs, del_only_pairs)
 P=$(python -c "from ber import config; print(config.path('preds', 'x').parent)")
