@@ -106,6 +106,61 @@ python -m ber.cn_rescue <in.tsv> <out.tsv> fr_llm_add_pairs.parquet && python -m
 Validate the final file with the candidate set too:
 `python ../../../student_resource/utils/validate_submission.py --matching <final.tsv> --candidate <candidate_pairs.tsv> --test-dir <test dir>`.
 
+**7. The final submission (public LB 0.98832): exact recipe**
+
+`output/matching_results.tsv` (md5 `e44c6dbb9e174f4d125e0c8db5ae82a3`) and `output/candidate_pairs.tsv` are the
+outputs of `scripts/post_final.sh L3c` below. Steps 1–5 must have run first (they produce `sub_K`, `ce_v4`,
+`ce_xlmr_fr`, `test_s3_K.parquet` and the holdout graphs).
+
+```bash
+cp ../data/*.parquet ../../../work/preds/     # France rule lists: noise-word pairs (cn_rescue_pairs[_full]) and the
+                                              # LB-negative decoy lists (nz_swap_pairs, del_only_pairs)
+P=$(python -c "from ber import config; print(config.path('preds', 'x').parent)")
+
+# US/India base (sub_N): stage 3 on ce_v4, ce_xlmr_fr, ce_big (Kaggle, below) and ce_full
+python -m ber.cefull train ce_full && python -m ber.cefull score ce_full
+python -m ber.experiments.overnight N ce_v4,ce_xlmr_fr,ce_big,ce_full          # -> output/sub_N.tsv, preds/test_s3_N.parquet
+
+# round 3: labels from sub_K's stage 3, corrected with the noise-word rule
+python -m ber.experiments.fr_pseudo test_s3_K.parquet fr_pseudo3               # -> preds/fr_pseudo3 (+ kaggle_ce copy)
+cp $P/fr_pseudo3.parquet $P/fr_pseudo3_uncorrected.parquet
+BER_CE_BASE=xlm-roberta-base BER_CE_BS=32 BER_CE_LR=2e-5 BER_CE_EXTRA=$P/fr_pseudo3_uncorrected.parquet \
+  python -m ber.crossenc ce_xlmr_fr3 0.01 0.99 4 1 all                         # XLM-R base, 1 epoch (uncorrected round 3)
+python -m ber.cn_rescue ../../../output/sub_K.tsv ../../../output/sub_Kcn.tsv cn_rescue_pairs.parquet
+python -m ber.experiments.fr_labels correct fr_pseudo3 ../../../output/sub_K.tsv ../../../output/sub_Kcn.tsv
+BER_CE_EXTRA=$P/fr_pseudo3.parquet python -m ber.crossenc ce_v5 0.01 0.99 4 2 all            # MiniLM, 2 epochs
+
+# Kaggle (2x T4): export the band once, then run the notebooks in ../kaggle/ (they call kaggle/train_ce_big.py)
+python -m ber.experiments.kaggle_export                                        # -> kaggle_ce/ce_{train,holdout,test}.parquet
+#   kaggle_ce_big.ipynb   : --model xlm-roberta-large --epochs 1 --hours 7.5 --bs 32 --lr 1e-5                -> ce_big_*
+#   kaggle_ce_bigfr.ipynb : --model xlm-roberta-large --pseudo fr_pseudo3_kaggle.parquet --epochs 0.53 --hours 7.3
+#                           --bs 32 --lr 1e-5                                                                  -> ce_bigfr_*
+#   kaggle_ce_e5.ipynb    : --model intfloat/multilingual-e5-base --pseudo fr_pseudo3_kaggle.parquet --epochs 0.85
+#                           --hours 5.0 --bs 32 --lr 2e-5                                                      -> ce_e5fr_*
+# copy the resulting <tag>_{holdout,test}.parquet files into work/preds/
+
+# round 4: labels from the France trust rule on the round-3 models (build W1), then round-4 cross-encoders
+bash ../scripts/wire_final.sh W1 ce_full        # France set ce_v5, ce_xlmr_fr3, ce_e5fr, ce_full -> preds/test_fr_trust_W1_fr
+                                                # (run before ce_full2 exists: wire_final adds ce_full2 automatically)
+python -m ber.experiments.fr_labels round $P/test_fr_trust_W1_fr.parquet fr_pseudo4
+BER_CE_EXTRA=$P/fr_pseudo4.parquet python -m ber.crossenc ce_v6 0.01 0.99 4 1 all            # MiniLM, 1 epoch
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True BER_CE_BASE=xlm-roberta-base BER_CE_BS=32 BER_CE_LR=2e-5 \
+  BER_CE_FRAC=0.6 BER_CE_EXTRA=$P/fr_pseudo4.parquet python -m ber.crossenc ce_xlmr_r4 0.01 0.99 4 1 all
+#   ce_full2 and ce_r4f: section 6
+
+# final build: the US/India gate keeps sub_N unless stage 3 improves on both holdout pools; France = trust rule on
+# all France-adapted CEs; then noise-word rescue, acronym rescue (+ candidates), tie trim, twins and the validator
+cp ../../../output/candidate_pairs.tsv ../../../output/candidate_pairs_orig.tsv   # blocking set from step 1
+bash ../scripts/wire_final.sh L3c ce_bigfr,ce_full,ce_v6,ce_xlmr_r4,ce_full2,ce_r4f
+bash ../scripts/post_final.sh L3c
+cp ../../../output/L3c_SAFE.tsv ../../../output/matching_results.tsv
+cp ../../../output/cands_L3c.tsv ../../../output/candidate_pairs.tsv
+```
+`post_final.sh` also writes `L3c_GAMBLE.tsv` (extra France adds). That file was not the final submission: an
+aggressive version of it scored 0.98819 on the LB. Round-5 models (`fr_labels round` on `test_fr_trust_L3d_fr`;
+`ce_v7`, `ce_r5f`, `ce_e5r5` via `kaggle_e5r5.ipynb`) scored 0.98829 and were not used either. Cross-encoder training
+is GPU-nondeterministic, so a rerun reproduces the scores up to noise, not bit-for-bit.
+
 ## What each new stage does
 - **Cross-encoder** (`crossenc.py`): reads an (X record, S1 record) text pair jointly and outputs a logit, only for pairs the
   matcher is unsure about (stage-1 probability in [0.01, 0.99], top-4 per X). It is weaker than the LightGBM matcher
@@ -146,7 +201,18 @@ Validate the final file with the candidate set too:
 | `decode.py` | unique assignment, thresholds, source caps, expected-F0.5 decoder |
 | `evaluate.py` | exact macro-F0.5 metric and blocking recall |
 | `submit.py` | output TSVs and official validator |
-| `experiments/` | one-off studies (recall of each retriever, probability calibration, diagnostics); results are in ARCHITECTURE.md |
+| `cefull.py` | full-coverage cross-encoder (band + confident pairs) and the DistilBERT round-4/5 variants |
+| `cn_rescue.py`, `acronym.py`, `tie_trim.py`, `twin.py`, `pairs_apply.py` | final post-rules: France noise-word and acronym rescues, France namesake-tie trim, US/India twins, generic add/drop |
+| `experiments/overnight.py` | stage 3 on a list of CEs (full + thinned pools, decoder choice, duplicates) -> `output/sub_<name>.tsv` |
+| `experiments/fr_trust.py` | France trust rule (blend of stage 3 with / without matcher-probability features) |
+| `experiments/fr_pseudo.py`, `experiments/fr_labels.py` | France pseudo-labels: rounds 1–3 and the rule-corrected rounds 3–5 |
+| `experiments/thinned_sim.py` | holdout graphs with 19% of S1 removed (thinned-pool training and evaluation) |
+| `experiments/kaggle_export.py` | band pairs with text for `kaggle/train_ce_big.py` (XLM-R large, multilingual E5) |
+| `experiments/guard.py` | pre-submission audit: validator, candidate subset, decoy-shape counts against a reference file |
+| `experiments/` (others) | one-off studies and proxies, including rejected ideas (gamble, LLM judge, cotrain, nonum); results are in ARCHITECTURE.md and the methodology document |
+
+Outside `src/`: `scripts/wire_final.sh` and `scripts/post_final.sh` (final build), `kaggle/` (cloud trainer + notebooks),
+`data/` (France rule pair lists).
 
 ## Compliance
 Uses only the provided data. No external lookups, geocoding or APIs. Hand-written normalisation
