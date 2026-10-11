@@ -10,10 +10,14 @@ Design, EDA findings and the experiment log live in [ARCHITECTURE.md](ARCHITECTU
 | v1 | bi-encoder + lexical retrieval, pruner, 2-stage LightGBM, threshold 0.8 | 0.9856 | 0.975 |
 | v2 | full-graph context, edit-fingerprint features, source caps, deterministic decode | 0.9889 | 0.982614 |
 | v2 + cross-encoder + stage 3 | cross-encoder on the uncertain band, stacker trained on out-of-sample holdout rows | 0.9910 (5-fold out-of-fold) | 0.984809 |
-| **+ France-adapted cross-encoders** (`sub_K`) | cross-encoders fine-tuned with France pseudo-labels (2 rounds, MiniLM + XLM-R base), stage 3 trained on full + thinned pools, expected-F0.5 decoder, exact-duplicate consistency | **0.99120** (thinned pool 0.99083) | **0.986429** |
+| **+ France-adapted cross-encoders** (`sub_K`) | cross-encoders fine-tuned with France pseudo-labels (2 rounds, MiniLM + XLM-R base), stage 3 trained on full + thinned pools, expected-F0.5 decoder, exact-duplicate consistency | 0.99120 (thinned pool 0.99083) | 0.986429 |
+| **+ final build** (`S3`, step 7) | France noise-word rescue (`cn_rescue`), France trust rule (blend with the no-matcher stack), round-3..5 cross-encoders, acronym rescue, namesake tie-trim, US/IN twins | **0.9914** | **0.988318** (rank ~221) |
 
 Holdout is fold 0 of the train S1 entities (US and India only; France has no labels). Leaderboard numbers come from
-the portal.
+the portal. The shipped `output/matching_results.tsv` is the 0.988318 file (step 7).
+
+> **Status: project closed.** After the competition the challenge dataset and the local caches (`work/`, `student_resource/`)
+> were deleted, so the commands below need the original challenge data and a fresh run to reproduce anything.
 
 ## Setup
 ```bash
@@ -71,7 +75,7 @@ bit-identical. Given the shipped `models/m_v2_s3ce2.txt`, `models/ce_v2.pt` (or 
 `preds/test_m_v2.parquet`, `python -m ber.stage3 final` regenerates the submitted `matching_results.tsv` byte for byte
 (checked: identical checksum to the file that scored 0.984809).
 
-**5. France adaptation (current best, `sub_K`)**
+**5. France adaptation (intermediate model `sub_K`, LB 0.986429; the final build is step 7)**
 ```bash
 bash ../run_france_adapt.sh      # from src/: thinned-pool simulation, 2 pseudo-label rounds, stage 3 -> output/sub_K.tsv
 ```
